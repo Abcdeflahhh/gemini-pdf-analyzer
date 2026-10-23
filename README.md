@@ -94,7 +94,19 @@ export GEMINI_API_KEY="your_api_key_here"
 
 ## 🖥️ Usage
 
-Run the script by providing the path to any PDF file:
+### Option 1: Modern Web Application (Recommended)
+Launch the interactive web UI powered by Streamlit:
+
+```bash
+streamlit run app.py
+```
+- Open your browser at `http://localhost:8501`.
+- Drag and drop any PDF file.
+- View interactive tabs for Executive Summary, Pydantic JSON, and raw text.
+- Download results as `.md` or `.json` with one click.
+
+### Option 2: Command Line Interface (CLI)
+Run the script directly via terminal:
 
 ```bash
 python main.py "path/to/your/document.pdf"
