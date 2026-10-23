@@ -11,7 +11,7 @@ from google.genai import types
 # 1. Konfigurasi Halaman Streamlit
 # ==========================================
 st.set_page_config(
-    page_title="AI PDF Analyzer & Summarizer",
+    page_title="AI PDF Analyzer & Chat Intelligence",
     page_icon="📑",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -36,6 +36,17 @@ class DocumentAnalysis(BaseModel):
     )
 
 
+class QuizQuestion(BaseModel):
+    question: str = Field(description="Pertanyaan kuis terkait materi dokumen")
+    options: list[str] = Field(description="Daftar 4 pilihan ganda (A, B, C, D)")
+    correct_answer: str = Field(description="Jawaban yang benar (harus sama persis dengan salah satu opsi)")
+    explanation: str = Field(description="Penjelasan ringkas mengapa jawaban tersebut benar")
+
+
+class QuizSet(BaseModel):
+    questions: list[QuizQuestion] = Field(description="Daftar 3 pertanyaan kuis pilihan ganda")
+
+
 # ==========================================
 # 3. Helper Ekstraksi & Analisis AI
 # ==========================================
@@ -53,18 +64,35 @@ def extract_text_from_pdf_stream(pdf_file) -> tuple[str, int]:
     return full_text, total_pages
 
 
-def analyze_with_gemini(document_text: str, api_key: str, model_name: str) -> DocumentAnalysis:
+def analyze_with_gemini(document_text: str, api_key: str, model_name: str, mode: str, pdf_bytes: bytes = None) -> DocumentAnalysis:
     client = genai.Client(api_key=api_key)
 
+    mode_prompts = {
+        "Umum (Comprehensive)": "Berikan ringkasan komprehensif, poin penting, dan rekomendasi umum.",
+        "Akademik / Mahasiswa": "Fokus pada konsep kunci, pemahaman materi perkuliahan/sekolah, definisi penting, dan kisi-kisi pemahaman ujian.",
+        "Eksekutif / Bisnis": "Fokus pada ringkasan eksekutif tingkat tinggi, temuan kritis, data/fakta utama, dan rekomendasi keputusan strategis.",
+    }
+
+    selected_instruction = mode_prompts.get(mode, mode_prompts["Umum (Comprehensive)"])
+
     prompt = (
+        f"Gaya Analisis: {selected_instruction}\n\n"
         "Analisis dokumen berikut secara mendalam. Ekstrak informasi penting sesuai "
-        "dengan skema data yang diminta dalam bahasa Indonesia yang formal dan jelas.\n\n"
+        "dengan skema data yang diminta dalam bahasa Indonesia yang jelas dan formal.\n\n"
         f"Konten Dokumen:\n{document_text}"
     )
 
+    contents = [prompt]
+    # Jika teks kosong (misal PDF hasil scan gambar), kirim file biner PDF langsung (Multimodal)
+    if not document_text and pdf_bytes:
+        contents = [
+            prompt,
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ]
+
     response = client.models.generate_content(
         model=model_name,
-        contents=prompt,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=DocumentAnalysis,
@@ -75,8 +103,54 @@ def analyze_with_gemini(document_text: str, api_key: str, model_name: str) -> Do
     return response.parsed
 
 
+def generate_quiz(document_text: str, api_key: str, model_name: str) -> QuizSet:
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        "Berdasarkan dokumen berikut, buatkan 3 pertanyaan kuis pilihan ganda (A, B, C, D) "
+        "yang menantang dan relevan untuk menguji pemahaman materi pembaca.\n\n"
+        f"Konten Dokumen:\n{document_text}"
+    )
+    response = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=QuizSet,
+            temperature=0.3,
+        ),
+    )
+    return response.parsed
+
+
+def chat_with_document(query: str, document_text: str, chat_history: list, api_key: str, model_name: str) -> str:
+    client = genai.Client(api_key=api_key)
+    system_instruction = (
+        "Anda adalah asisten AI profesional untuk dokumen ini. Jawablah pertanyaan pengguna "
+        "dengan akurat, ramah, dan HANYA berdasarkan informasi yang ada di dalam dokumen berikut. "
+        "Jika informasinya tidak ada dalam dokumen, jelaskan secara jujur bahwa dokumen tidak memuat info tersebut.\n\n"
+        f"=== ISI DOKUMEN ===\n{document_text}"
+    )
+
+    formatted_history = []
+    for msg in chat_history:
+        formatted_history.append(f"{msg['role'].upper()}: {msg['content']}")
+    formatted_history.append(f"USER: {query}")
+
+    full_prompt = "\n".join(formatted_history)
+
+    response = client.models.generate_content(
+        model=model_name,
+        contents=full_prompt,
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=0.3,
+        ),
+    )
+    return response.text
+
+
 # ==========================================
-# 4. Sidebar: Pengaturan & Profil
+# 4. Sidebar: Konfigurasi & Preset
 # ==========================================
 with st.sidebar:
     st.header("⚙️ Konfigurasi")
@@ -90,16 +164,23 @@ with st.sidebar:
     )
 
     if not api_key:
-        st.warning("⚠️ Masukkan Gemini API Key Anda untuk melanjutkan.")
+        st.warning("⚠️ Masukkan Gemini API Key untuk melanjutkan.")
         st.caption("[👉 Dapatkan API Key Gratis di Google AI Studio](https://aistudio.google.com/apikey)")
     else:
-        st.success("✅ API Key siap digunakan!")
+        st.success("✅ API Key siap!")
 
     model_option = st.selectbox(
-        "Pilih Model Gemini:",
+        "Model Gemini:",
         options=["gemini-3.8-flash", "gemini-2.5-flash"],
         index=0,
-        help="gemini-3.8-flash adalah model generasi terbaru yang cepat dan akurat.",
+        help="gemini-3.8-flash adalah model terbaru yang sangat cepat dan akurat.",
+    )
+
+    analysis_mode = st.selectbox(
+        "🎯 Mode Analisis:",
+        options=["Umum (Comprehensive)", "Akademik / Mahasiswa", "Eksekutif / Bisnis"],
+        index=0,
+        help="Sesuaikan fokus ringkasan sesuai kebutuhan Anda.",
     )
 
     st.markdown("---")
@@ -112,66 +193,82 @@ with st.sidebar:
 # ==========================================
 # 5. Konten Utama
 # ==========================================
-st.title("📑 AI PDF Analyzer & Structured Summarizer")
+st.title("📑 AI PDF Analyzer & Chat Intelligence")
 st.markdown(
-    "Unggah dokumen PDF (materi kuliah, modul, jurnal, atau laporan kerja) untuk diekstrak "
-    "dan dianalisis intisarinya secara otomatis menjadi **data terstruktur** dengan bantuan AI."
+    "Unggah dokumen PDF Anda untuk diekstrak, dianalisis intisarinya secara terstruktur, "
+    "menguji pemahaman dengan kuis otomatis, atau **tanya jawab langsung (Chat with PDF)**!"
 )
 
 st.markdown("---")
 
 uploaded_file = st.file_uploader(
-    "Pilih atau Drag & Drop file PDF Anda ke kotak ini:",
+    "Pilih atau Drag & Drop file PDF Anda:",
     type=["pdf"],
-    help="Hanya file dengan ekstensi .pdf yang didukung.",
+    help="Mendukung file dokumen PDF materi kuliah, modul, jurnal, atau laporan.",
 )
 
+# Reset session jika user mengganti file PDF
 if uploaded_file is not None:
+    current_name = uploaded_file.name
+    if st.session_state.get("current_file") != current_name:
+        st.session_state["current_file"] = current_name
+        st.session_state.pop("analysis_result", None)
+        st.session_state.pop("quiz_result", None)
+        st.session_state["chat_messages"] = []
+
     file_size_kb = len(uploaded_file.getvalue()) / 1024
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.info(f"📁 **File:** `{uploaded_file.name}` ({file_size_kb:.1f} KB)")
+        st.info(f"📁 **File:** `{uploaded_file.name}` ({file_size_kb:.1f} KB) | Mode: **{analysis_mode}**")
     with col2:
         start_analysis = st.button("🚀 Analisis Dokumen", type="primary", use_container_width=True)
 
     if start_analysis:
         if not api_key:
-            st.error("❌ Silakan masukkan Gemini API Key di menu sebelah kiri terlebih dahulu!")
+            st.error("❌ Silakan masukkan Gemini API Key di sidebar sebelah kiri!")
         else:
-            with st.spinner("⏳ Membaca isi PDF dan menganalisis teks dengan Gemini AI..."):
+            with st.spinner("⏳ Memproses PDF dan menganalisis materi dengan Gemini 3.8 Flash..."):
                 try:
-                    pdf_bytes = io.BytesIO(uploaded_file.getvalue())
-                    raw_text, total_pages = extract_text_from_pdf_stream(pdf_bytes)
+                    file_bytes = uploaded_file.getvalue()
+                    pdf_bytes_io = io.BytesIO(file_bytes)
+                    raw_text, total_pages = extract_text_from_pdf_stream(pdf_bytes_io)
 
-                    if not raw_text:
-                        st.error("❌ Dokumen tidak mengandung teks terbaca (mungkin berupa hasil scan gambar).")
-                    else:
-                        analysis: DocumentAnalysis = analyze_with_gemini(
-                            document_text=raw_text,
-                            api_key=api_key,
-                            model_name=model_option,
-                        )
+                    analysis = analyze_with_gemini(
+                        document_text=raw_text,
+                        api_key=api_key,
+                        model_name=model_option,
+                        mode=analysis_mode,
+                        pdf_bytes=file_bytes,
+                    )
 
-                        st.session_state["analysis_result"] = analysis
-                        st.session_state["source_filename"] = uploaded_file.name
-                        st.session_state["raw_text"] = raw_text
-                        st.session_state["total_pages"] = total_pages
-                        st.success(f"🎉 Dokumen ({total_pages} halaman) berhasil dianalisis dengan sempurna!")
+                    st.session_state["analysis_result"] = analysis
+                    st.session_state["source_filename"] = uploaded_file.name
+                    st.session_state["raw_text"] = raw_text
+                    st.session_state["total_pages"] = total_pages
+                    st.success(f"🎉 Analisis selesai untuk {uploaded_file.name} ({total_pages} halaman)!")
                 except Exception as e:
-                    st.error(f"❌ Terjadi kesalahan saat analisis: {e}")
+                    st.error(f"❌ Terjadi kesalahan: {e}")
 
-# Tampilkan Hasil Analisis jika sudah ada di session
+# Tampilkan Tabs Hasil Analisis
 if "analysis_result" in st.session_state:
     analysis: DocumentAnalysis = st.session_state["analysis_result"]
     filename = st.session_state["source_filename"]
     total_pages = st.session_state.get("total_pages", 0)
+    raw_text = st.session_state.get("raw_text", "")
 
     st.markdown("---")
-    st.subheader(f"📊 Hasil Analisis: {analysis.title}")
+    st.subheader(f"📊 {analysis.title}")
 
-    tab1, tab2, tab3 = st.tabs(["📋 Ringkasan & Poin Penting", "💻 Format JSON Terstruktur", "📄 Teks Asli PDF"])
+    tab_summary, tab_chat, tab_quiz, tab_json, tab_raw = st.tabs([
+        "📋 Ringkasan & Poin Penting",
+        "💬 Tanya Jawab (Chat PDF)",
+        "🎯 Kuis Pemahaman",
+        "💻 Data JSON Terstruktur",
+        "📄 Teks Asli Dokumen",
+    ])
 
-    with tab1:
+    # TAB 1: Ringkasan
+    with tab_summary:
         st.markdown("#### 📝 Ringkasan Eksekutif")
         st.write(analysis.summary)
 
@@ -185,49 +282,112 @@ if "analysis_result" in st.session_state:
             for item in analysis.action_items:
                 st.markdown(f"- {item}")
 
-    with tab2:
+        st.markdown("---")
+        st.markdown("#### 📥 Unduh Hasil Analisis")
+        col_d1, col_d2 = st.columns(2)
+
+        md_content = f"# {analysis.title}\n\n"
+        md_content += f"- **Sumber Dokumen**: `{filename}`\n"
+        md_content += f"- **Mode Analisis**: {analysis_mode}\n"
+        md_content += f"- **Model AI**: Google Gemini ({model_option})\n\n"
+        md_content += "## 📝 Ringkasan Eksekutif\n"
+        md_content += f"{analysis.summary}\n\n"
+        md_content += "## 🔍 Poin-Poin Penting\n"
+        for idx, point in enumerate(analysis.key_points, 1):
+            md_content += f"{idx}. **{point.topic}**\n   {point.details}\n"
+        if analysis.action_items:
+            md_content += "\n## ✅ Rekomendasi / Tindak Lanjut\n"
+            for idx, item in enumerate(analysis.action_items, 1):
+                md_content += f"- {item}\n"
+
+        with col_d1:
+            st.download_button(
+                label="📄 Unduh Ringkasan (.md)",
+                data=md_content,
+                file_name=f"{filename.replace('.pdf', '')}_summary.md",
+                mime="text/markdown",
+                use_container_width=True,
+            )
+        with col_d2:
+            st.download_button(
+                label="💾 Unduh Data JSON (.json)",
+                data=analysis.model_dump_json(indent=2),
+                file_name=f"{filename.replace('.pdf', '')}_analysis.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+    # TAB 2: Chat with PDF
+    with tab_chat:
+        st.markdown("#### 💬 Tanya Apapun Tentang Dokumen Ini")
+        st.caption("AI akan menjawab pertanyaan secara spesifik berdasarkan isi dokumen yang Anda unggah.")
+
+        if "chat_messages" not in st.session_state:
+            st.session_state["chat_messages"] = []
+
+        # Tampilkan riwayat chat sebelumnya
+        for msg in st.session_state["chat_messages"]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        user_query = st.chat_input("Ketik pertanyaan Anda tentang dokumen ini...")
+        if user_query:
+            st.session_state["chat_messages"].append({"role": "user", "content": user_query})
+            with st.chat_message("user"):
+                st.markdown(user_query)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Berpikir berdasarkan isi PDF..."):
+                    try:
+                        reply = chat_with_document(
+                            query=user_query,
+                            document_text=raw_text,
+                            chat_history=st.session_state["chat_messages"][:-1],
+                            api_key=api_key,
+                            model_name=model_option,
+                        )
+                        st.markdown(reply)
+                        st.session_state["chat_messages"].append({"role": "assistant", "content": reply})
+                    except Exception as e:
+                        st.error(f"Gagal mendapatkan respon chat: {e}")
+
+    # TAB 3: Kuis Otomatis
+    with tab_quiz:
+        st.markdown("#### 🎯 Uji Pemahaman Anda")
+        st.caption("Buat soal pilihan ganda otomatis dari materi dokumen ini untuk menguji pemahaman Anda.")
+
+        if st.button("🎲 Generate Kuis Baru (3 Pertanyaan)", use_container_width=False):
+            with st.spinner("Membuat pertanyaan kuis dengan Gemini..."):
+                try:
+                    quiz_set = generate_quiz(raw_text, api_key, model_option)
+                    st.session_state["quiz_result"] = quiz_set
+                except Exception as e:
+                    st.error(f"Gagal membuat kuis: {e}")
+
+        if "quiz_result" in st.session_state:
+            quiz: QuizSet = st.session_state["quiz_result"]
+            for idx, q in enumerate(quiz.questions, 1):
+                st.markdown(f"**Soal {idx}: {q.question}**")
+                user_choice = st.radio(
+                    f"Pilihan Jawaban Soal {idx}:",
+                    options=q.options,
+                    key=f"quiz_opt_{idx}",
+                    label_visibility="collapsed",
+                )
+                with st.expander(f"👁️ Lihat Kunci Jawaban Soal {idx}"):
+                    if user_choice == q.correct_answer:
+                        st.success(f"✅ Jawaban Anda Benar: **{q.correct_answer}**")
+                    else:
+                        st.info(f"💡 Kunci Jawaban: **{q.correct_answer}**")
+                    st.write(f"*Penjelasan:* {q.explanation}")
+                st.markdown("---")
+
+    # TAB 4: JSON
+    with tab_json:
         st.markdown("#### 💾 Data JSON Tervalidasi (Pydantic v2)")
-        json_str = analysis.model_dump_json(indent=2)
-        st.code(json_str, language="json")
+        st.code(analysis.model_dump_json(indent=2), language="json")
 
-    with tab3:
+    # TAB 5: Raw Text
+    with tab_raw:
         st.markdown(f"#### 📄 Teks Mentah yang Diekstrak ({total_pages} Halaman)")
-        st.text_area("Konten Teks", st.session_state.get("raw_text", ""), height=350)
-
-    # Tombol Unduh / Export
-    st.markdown("---")
-    st.subheader("📥 Unduh Hasil Analisis")
-
-    col_d1, col_d2 = st.columns(2)
-
-    # Siapkan konten Markdown
-    md_content = f"# {analysis.title}\n\n"
-    md_content += f"- **Sumber Dokumen**: `{filename}`\n"
-    md_content += f"- **Dianalisis Oleh**: Google Gemini ({model_option})\n\n"
-    md_content += "## 📝 Ringkasan Eksekutif\n"
-    md_content += f"{analysis.summary}\n\n"
-    md_content += "## 🔍 Poin-Poin Penting\n"
-    for idx, point in enumerate(analysis.key_points, 1):
-        md_content += f"{idx}. **{point.topic}**\n   {point.details}\n"
-    if analysis.action_items:
-        md_content += "\n## ✅ Rekomendasi / Tindak Lanjut\n"
-        for item in analysis.action_items:
-            md_content += f"- {item}\n"
-
-    with col_d1:
-        st.download_button(
-            label="📄 Unduh Ringkasan (.md)",
-            data=md_content,
-            file_name=f"{filename.replace('.pdf', '')}_summary.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
-
-    with col_d2:
-        st.download_button(
-            label="💾 Unduh Data JSON (.json)",
-            data=analysis.model_dump_json(indent=2),
-            file_name=f"{filename.replace('.pdf', '')}_analysis.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+        st.text_area("Konten Teks", raw_text, height=350)

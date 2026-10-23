@@ -11,13 +11,14 @@ An intelligent document processing CLI tool powered by **Google Gemini 3.8 Flash
 
 ## 🚀 Key Features
 
-- **📑 Multi-Page PDF Extraction**: Extracts and organizes text across all document pages using `pypdf`.
+- **📑 Multi-Page PDF Extraction**: Extracts and organizes text across all document pages using `pypdf` with multimodal image fallback for scanned documents.
 - **🧠 Generative Intelligence with Gemini 3.8 Flash**: Analyzes deep semantic context rather than just keyword matching.
 - **🛡️ Strict Structured Outputs**: Leverages Pydantic v2 schemas (`response_schema`) to guarantee 100% compliant JSON data without formatting hallucinations.
-- **💾 Dual-Format Export**: Automatically saves results into:
-  - `outputs/<filename>_analysis.json` (Structured data ready for APIs, databases, or downstream applications).
-  - `outputs/<filename>_summary.md` (Clean, human-readable executive summary and action items).
-- **⚡ Fast & Lightweight**: Uses Gemini's fastest and most cost-effective reasoning model.
+- **💬 Interactive Chat with PDF (Q&A)**: Ask targeted questions and receive accurate answers grounded strictly in the document content.
+- **🎯 Analysis Presets**: Choose between *Comprehensive*, *Academic / Student* (key concepts & exam topics), or *Executive / Business* (high-level decisions & metrics).
+- **🎲 Automatic Quiz Generator**: Generates multiple-choice quizzes with answer keys and explanations to test comprehension.
+- **💾 Dual-Format Export**: One-click download of structured JSON and Markdown summaries.
+- **🌐 Modern Streamlit Web Interface & CLI**: Run interactively in your browser or through the command line.
 
 ---
 
