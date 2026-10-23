@@ -54,7 +54,7 @@ An intelligent document processing CLI tool powered by **Google Gemini 3.8 Flash
 
 ### 1. Clone the Repository
 ```bash
-git clone https://github.com/flahhhXvanilla/gemini-pdf-analyzer.git
+git clone https://github.com/Abcdeflahhh/gemini-pdf-analyzer.git
 cd gemini-pdf-analyzer
 ```
 
