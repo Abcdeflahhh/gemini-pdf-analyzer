@@ -152,22 +152,51 @@ def chat_with_document(query: str, document_text: str, chat_history: list, api_k
 # ==========================================
 # 4. Sidebar: Konfigurasi & Preset
 # ==========================================
+def resolve_api_key(custom_key: str) -> tuple[str, str]:
+    if custom_key and custom_key.strip():
+        return custom_key.strip(), "custom"
+
+    # 1. Cek Streamlit Secrets (untuk deployment cloud)
+    try:
+        if "GEMINI_API_KEY" in st.secrets and st.secrets["GEMINI_API_KEY"]:
+            return st.secrets["GEMINI_API_KEY"], "system"
+    except Exception:
+        pass
+
+    # 2. Cek Environment Variable (lokal)
+    env_key = os.environ.get("GEMINI_API_KEY", "")
+    if env_key:
+        return env_key, "system"
+
+    return "", "none"
+
+
 with st.sidebar:
     st.header("⚙️ Konfigurasi")
 
-    env_api_key = os.environ.get("GEMINI_API_KEY", "")
-    api_key = st.text_input(
-        "Gemini API Key:",
-        value=env_api_key,
-        type="password",
-        help="Dapatkan kunci API gratis Anda di https://aistudio.google.com/apikey",
-    )
+    # Periksa apakah sistem memiliki API key bawaan
+    default_key, default_source = resolve_api_key("")
+    user_custom_key = ""
 
-    if not api_key:
-        st.warning("⚠️ Masukkan Gemini API Key untuk melanjutkan.")
-        st.caption("[👉 Dapatkan API Key Gratis di Google AI Studio](https://aistudio.google.com/apikey)")
+    if default_key:
+        st.success("🟢 **Sistem Siap Digunakan!**\n\nAPI Key bawaan aktif. Anda dan pengunjung dapat langsung menganalisis file tanpa perlu mengisi apa pun.")
+        with st.expander("Gunakan API Key Sendiri (Opsional)"):
+            user_custom_key = st.text_input(
+                "Custom Gemini API Key:",
+                type="password",
+                help="Kosongkan jika ingin menggunakan kuota bawaan web ini.",
+            )
     else:
-        st.success("✅ API Key siap!")
+        user_custom_key = st.text_input(
+            "Gemini API Key:",
+            type="password",
+            help="Dapatkan kunci API gratis di https://aistudio.google.com/apikey",
+        )
+        if not user_custom_key:
+            st.warning("⚠️ Masukkan Gemini API Key untuk memulai.")
+            st.caption("[👉 Dapatkan API Key Gratis di Google AI Studio](https://aistudio.google.com/apikey)")
+
+    active_api_key, active_source = resolve_api_key(user_custom_key)
 
     model_option = st.selectbox(
         "Model Gemini:",
@@ -224,8 +253,8 @@ if uploaded_file is not None:
         start_analysis = st.button("🚀 Analisis Dokumen", type="primary", use_container_width=True)
 
     if start_analysis:
-        if not api_key:
-            st.error("❌ Silakan masukkan Gemini API Key di sidebar sebelah kiri!")
+        if not active_api_key:
+            st.error("❌ API Key belum tersedia. Silakan masukkan Gemini API Key di sidebar sebelah kiri!")
         else:
             with st.spinner("⏳ Memproses PDF dan menganalisis materi dengan Gemini 3.8 Flash..."):
                 try:
@@ -235,7 +264,7 @@ if uploaded_file is not None:
 
                     analysis = analyze_with_gemini(
                         document_text=raw_text,
-                        api_key=api_key,
+                        api_key=active_api_key,
                         model_name=model_option,
                         mode=analysis_mode,
                         pdf_bytes=file_bytes,
@@ -343,7 +372,7 @@ if "analysis_result" in st.session_state:
                             query=user_query,
                             document_text=raw_text,
                             chat_history=st.session_state["chat_messages"][:-1],
-                            api_key=api_key,
+                            api_key=active_api_key,
                             model_name=model_option,
                         )
                         st.markdown(reply)
@@ -359,7 +388,7 @@ if "analysis_result" in st.session_state:
         if st.button("🎲 Generate Kuis Baru (3 Pertanyaan)", use_container_width=False):
             with st.spinner("Membuat pertanyaan kuis dengan Gemini..."):
                 try:
-                    quiz_set = generate_quiz(raw_text, api_key, model_option)
+                    quiz_set = generate_quiz(raw_text, active_api_key, model_option)
                     st.session_state["quiz_result"] = quiz_set
                 except Exception as e:
                     st.error(f"Gagal membuat kuis: {e}")
