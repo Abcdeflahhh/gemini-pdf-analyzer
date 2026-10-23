@@ -1,6 +1,20 @@
 import os
 import sys
+import argparse
 from pathlib import Path
+
+# Pastikan UTF-8 encoding di Windows console agar aman mencetak karakter non-ASCII/emoji
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 from pydantic import BaseModel, Field
 import pypdf
 from google import genai
@@ -8,7 +22,7 @@ from google.genai import types
 
 
 # ==========================================
-# 1. Definisikan Skema Data Terstruktur (Pydantic)
+# 1. Definisikan Skema Data Terstruktur (Pydantic v2)
 # ==========================================
 class KeyPoint(BaseModel):
     topic: str = Field(description="Topik atau sub-bahasan utama")
@@ -26,52 +40,121 @@ class DocumentAnalysis(BaseModel):
 
 
 # ==========================================
-# 2. Fungsi Ekstraksi Teks dari PDF (pypdf)
+# 2. Resolusi API Key (Multi-Source Fallback)
 # ==========================================
-def extract_text_from_pdf(pdf_path: str) -> str:
+def resolve_gemini_api_key() -> str:
+    """Mencari GEMINI_API_KEY dari environment variable, .env, atau .streamlit/secrets.toml."""
+    # 1. Cek Environment Variable langsung
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if api_key:
+        return api_key
+
+    # 2. Cek file .env lokal
+    env_file = Path(".env")
+    if env_file.is_file():
+        try:
+            with open(env_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        if k.strip() == "GEMINI_API_KEY":
+                            val = v.strip().strip("'\"")
+                            if val:
+                                return val
+        except Exception:
+            pass
+
+    # 3. Cek .streamlit/secrets.toml lokal jika ada
+    secrets_file = Path(".streamlit/secrets.toml")
+    if secrets_file.is_file():
+        try:
+            with open(secrets_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        if k.strip() == "GEMINI_API_KEY":
+                            val = v.strip().strip("'\"")
+                            if val:
+                                return val
+        except Exception:
+            pass
+
+    return ""
+
+
+# ==========================================
+# 3. Fungsi Ekstraksi Teks dari PDF (pypdf)
+# ==========================================
+def extract_text_from_pdf(pdf_path: str) -> tuple[str, int]:
     path = Path(pdf_path)
     if not path.is_file():
         raise FileNotFoundError(f"File PDF tidak ditemukan: {pdf_path}")
 
     reader = pypdf.PdfReader(str(path))
     pages_text = []
+    total_pages = len(reader.pages)
 
-    print(f"📄 Membaca dokumen: {path.name} ({len(reader.pages)} halaman)...")
+    print(f"📄 Membaca dokumen: {path.name} ({total_pages} halaman)...")
     for i, page in enumerate(reader.pages):
         text = page.extract_text()
         if text:
             pages_text.append(f"--- Halaman {i + 1} ---\n{text}")
 
     full_text = "\n\n".join(pages_text).strip()
-    if not full_text:
-        raise ValueError("Tidak ada teks yang dapat diekstrak dari PDF (mungkin berupa hasil scan gambar).")
-
-    return full_text
+    return full_text, total_pages
 
 
 # ==========================================
-# 3. Analisis Dokumen dengan Gemini API
+# 4. Analisis Dokumen dengan Gemini API (Multimodal Support)
 # ==========================================
-def analyze_with_gemini(document_text: str) -> DocumentAnalysis:
-    api_key = os.environ.get("GEMINI_API_KEY")
+def analyze_with_gemini(
+    document_text: str,
+    pdf_path: str = None,
+    mode: str = "Umum",
+    model_name: str = "gemini-3.8-flash",
+) -> DocumentAnalysis:
+    api_key = resolve_gemini_api_key()
     if not api_key:
-        print("\n❌ Error: GEMINI_API_KEY belum diatur di environment.")
+        print("\n❌ Error: GEMINI_API_KEY belum diatur di environment, .env, maupun .streamlit/secrets.toml.")
         print("Setel API Key Anda di PowerShell dengan perintah:")
         print('  $env:GEMINI_API_KEY="API_KEY_ANDA"')
+        print("Atau buat file .env dengan isi:")
+        print('  GEMINI_API_KEY="API_KEY_ANDA"')
         sys.exit(1)
 
-    print("🤖 Mengirim teks ke Gemini untuk analisis terstruktur...")
-    client = genai.Client()
+    mode_instructions = {
+        "Umum": "Berikan ringkasan komprehensif, poin penting, dan rekomendasi umum.",
+        "Akademik": "Fokus pada konsep kunci, materi pokok, definisi ilmiah, dan pemahaman ujian/akademik.",
+        "Bisnis": "Fokus pada ringkasan eksekutif tingkat tinggi, temuan kritis, data/fakta utama, dan rekomendasi keputusan strategis.",
+    }
+    instruction = mode_instructions.get(mode, mode_instructions["Umum"])
+
+    client = genai.Client(api_key=api_key)
 
     prompt = (
+        f"Gaya Analisis: {instruction}\n\n"
         "Analisis dokumen berikut secara mendalam. Ekstrak informasi sesuai "
-        "dengan skema JSON yang diminta dalam bahasa Indonesia.\n\n"
-        f"Konten Dokumen:\n{document_text}"
+        "dengan skema JSON yang diminta dalam bahasa Indonesia yang baku dan jelas.\n\n"
     )
 
+    if document_text:
+        contents = [f"{prompt}Konten Dokumen:\n{document_text}"]
+    elif pdf_path and Path(pdf_path).is_file():
+        print("⚠️ Teks mentah tidak ditemukan. Menggunakan analisis multimodal (gambar/scan) Gemini...")
+        pdf_bytes = Path(pdf_path).read_bytes()
+        contents = [
+            prompt,
+            types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+        ]
+    else:
+        raise ValueError("Tidak ada teks maupun file PDF valid yang dapat dianalisis.")
+
+    print(f"🤖 Mengirim ke {model_name} (Mode: {mode}) untuk analisis terstruktur...")
     response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
+        model=model_name,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=DocumentAnalysis,
@@ -84,9 +167,14 @@ def analyze_with_gemini(document_text: str) -> DocumentAnalysis:
 
 
 # ==========================================
-# 4. Fungsi Penyimpanan Hasil (JSON & Markdown)
+# 5. Fungsi Penyimpanan Hasil (JSON & Markdown)
 # ==========================================
-def save_results(analysis: DocumentAnalysis, source_pdf_path: str) -> tuple[Path, Path]:
+def save_results(
+    analysis: DocumentAnalysis,
+    source_pdf_path: str,
+    mode: str = "Umum",
+    model_name: str = "gemini-3.8-flash",
+) -> tuple[Path, Path]:
     output_dir = Path("outputs")
     output_dir.mkdir(exist_ok=True)
 
@@ -104,7 +192,8 @@ def save_results(analysis: DocumentAnalysis, source_pdf_path: str) -> tuple[Path
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# {analysis.title}\n\n")
         f.write(f"- **Sumber Dokumen**: `{Path(source_pdf_path).name}`\n")
-        f.write(f"- **Dianalisis Oleh**: Google Gemini (gemini-3.8-flash)\n\n")
+        f.write(f"- **Mode Analisis**: {mode}\n")
+        f.write(f"- **Dianalisis Oleh**: Google Gemini ({model_name})\n\n")
         f.write("## 📝 Ringkasan Eksekutif\n")
         f.write(f"{analysis.summary}\n\n")
         f.write("## 🔍 Poin-Poin Penting\n")
@@ -119,12 +208,33 @@ def save_results(analysis: DocumentAnalysis, source_pdf_path: str) -> tuple[Path
 
 
 # ==========================================
-# 5. Main Flow
+# 6. Main Flow (CLI Entrypoint)
 # ==========================================
 def main():
-    if len(sys.argv) > 1:
-        pdf_path = sys.argv[1]
-    else:
+    parser = argparse.ArgumentParser(
+        description="AI PDF Analyzer & Structured Summarizer powered by Google Gemini"
+    )
+    parser.add_argument(
+        "pdf_path",
+        nargs="?",
+        help="Path ke file PDF dokumen yang ingin dianalisis"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["Umum", "Akademik", "Bisnis"],
+        default="Umum",
+        help="Mode gaya analisis: Umum, Akademik, atau Bisnis (default: Umum)"
+    )
+    parser.add_argument(
+        "--model",
+        default="gemini-3.8-flash",
+        help="Model Gemini yang digunakan (default: gemini-3.8-flash)"
+    )
+
+    args = parser.parse_args()
+
+    pdf_path = args.pdf_path
+    if not pdf_path:
         pdf_path = input("Masukkan path ke file PDF: ").strip().strip('"')
 
     if not pdf_path:
@@ -132,12 +242,17 @@ def main():
         return
 
     try:
-        text = extract_text_from_pdf(pdf_path)
-        analysis = analyze_with_gemini(text)
+        text, total_pages = extract_text_from_pdf(pdf_path)
+        analysis = analyze_with_gemini(
+            document_text=text,
+            pdf_path=pdf_path,
+            mode=args.mode,
+            model_name=args.model,
+        )
 
-        print("\n" + "=" * 50)
-        print(" HASIL ANALISIS DOKUMEN")
-        print("=" * 50)
+        print("\n" + "=" * 55)
+        print("📑 HASIL ANALISIS DOKUMEN")
+        print("=" * 55)
         print(f"\n📌 Judul  : {analysis.title}")
         print(f"\n📝 Ringkasan:\n{analysis.summary}")
 
@@ -151,12 +266,12 @@ def main():
                 print(f"  {idx}. {item}")
 
         # Simpan hasil secara otomatis
-        json_file, md_file = save_results(analysis, pdf_path)
-        print("\n" + "=" * 50)
+        json_file, md_file = save_results(analysis, pdf_path, mode=args.mode, model_name=args.model)
+        print("\n" + "=" * 55)
         print("💾 HASIL BERHASIL DISIMPAN:")
         print(f"  • JSON : {json_file}")
         print(f"  • MD   : {md_file}")
-        print("=" * 50)
+        print("=" * 55)
 
     except Exception as e:
         print(f"\n❌ Terjadi kesalahan: {e}")
